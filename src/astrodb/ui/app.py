@@ -270,13 +270,23 @@ def _sys_clip_paste() -> str:
 
 
 class ADQLTextArea(TextArea):
-    """TextArea that (1) highlights ADQL keywords and (2) intercepts Tab for focus cycling."""
+    """TextArea: ADQL highlight, Tab focus cycle, Cmd line nav."""
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key in ("tab", "shift+tab"):
             event.prevent_default()
             event.stop()
             self.app.action_cycle_focus(event.key == "shift+tab")
+            return
+        if event.key in ("super+right", "cmd+right"):
+            event.prevent_default()
+            event.stop()
+            self.action_cursor_line_end()
+            return
+        if event.key in ("super+left", "cmd+left"):
+            event.prevent_default()
+            event.stop()
+            self.action_cursor_line_start()
             return
         await super()._on_key(event)
 
@@ -553,7 +563,7 @@ class HeaderPanel(Static):
 
 
 class EditorPanel(Static):
-    DEFAULT_QUERY = 'SELECT TOP 10 RA_ICRS, DE_ICRS, Gmag\nFROM "I/355/gaiadr3"'
+    DEFAULT_QUERY = ""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="editor-filebar"):
@@ -629,11 +639,16 @@ class SidebarPanel(Static):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._query_history: list[QueryHistoryEntry] = []
+        self._cols_all: list[str] = []
+        self._cols_selected: list[str] | None = None
+        self._cols_schema_known: bool = True
+        self._cols_filter: str = ""
 
     def compose(self) -> ComposeResult:
         yield Label("[bold]◈ TABLA:[/bold] [dim]—[/dim]", id="table-label")
         yield Rule(line_style="solid")
         yield Label("[bold]▾ Columnas:[/bold]", id="columns-title")
+        yield Input(placeholder="filtrar columnas…", id="cols-filter")
         yield ListView(id="columns-list")
         yield Rule(line_style="dashed")
         yield Label("[bold]◎ Historial[/bold] [dim](d borrar · r reintentar · k aniquilar)[/dim]", id="history-title")
@@ -662,32 +677,54 @@ class SidebarPanel(Static):
         selected: list[str] | None = None,
         schema_known: bool = True,
     ) -> None:
+        self._cols_all = list(cols)
+        self._cols_selected = selected
+        self._cols_schema_known = schema_known
+        self._render_columns()
+
+    def _render_columns(self) -> None:
+        cols = self._cols_all
+        selected = self._cols_selected
+        schema_known = self._cols_schema_known
+        flt = self._cols_filter.lower().strip()
+
         lv = self.query_one("#columns-list", ListView)
         lv.clear()
 
         schema_set: set[str] = set(cols)
         pinned: set[str] = set()
 
+        def matches(name: str) -> bool:
+            return not flt or flt in name.lower()
+
         if selected and selected != ["*"]:
             for sel in selected:
                 pinned.add(sel)
+                if not matches(sel):
+                    continue
                 if sel in schema_set:
                     lv.append(ListItem(Label(f"[bold green]● {sel}[/bold green]")))
                 elif schema_known:
                     lv.append(ListItem(Label(f"[bold red]✗ {sel}[/bold red]")))
                 else:
                     lv.append(ListItem(Label(f"[bold]◌ {sel}[/bold]")))
-            if pinned:
+            if pinned and any(matches(s) for s in selected):
                 lv.append(ListItem(Label("[dim]──────[/dim]")))
 
-        rest = [c for c in cols if c not in pinned]
-        for col in rest[:50]:
+        rest = [c for c in cols if c not in pinned and matches(c)]
+        for col in rest:
             lv.append(ListItem(Label(f"[dim]▸[/dim] [green]{col}[/green]")))
 
         if not cols and not selected:
             lv.append(ListItem(Label("[dim]· sin columnas[/dim]")))
-        elif len(rest) > 50:
-            lv.append(ListItem(Label(f"[dim]· … y {len(rest) - 50} más[/dim]")))
+        elif flt and not rest and not any(matches(s) for s in (selected or [])):
+            lv.append(ListItem(Label(f"[dim]· sin coincidencias para '{flt}'[/dim]")))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "cols-filter":
+            return
+        self._cols_filter = event.value
+        self._render_columns()
 
     @staticmethod
     def _snippet(adql: str) -> str:
@@ -797,7 +834,7 @@ class AstroDbApp(App):
         Binding("ctrl+b", "validate_adql", "Validar", priority=True, show=False),
         Binding("ctrl+g", "preview_query", "Previa", priority=True, show=False),
         Binding("ctrl+d", "cycle_db", "Cambiar DB", priority=True),
-        Binding("ctrl+f", "fetch_columns", "Columnas"),
+        Binding("ctrl+f", "fetch_columns", "Columnas", priority=True),
         Binding("ctrl+n", "toggle_nulls", "Nulos"),
         Binding("ctrl+s", "save_adql", "Guardar consulta", priority=True, show=False),
         Binding("ctrl+shift+s", "save_as_adql", "Guardar como", priority=True, show=False),
@@ -811,7 +848,7 @@ class AstroDbApp(App):
         Binding("shift+tab", "cycle_focus(True)", show=False),
     ]
 
-    _FOCUS_RING = ("#adql-editor", "#results-table", "#columns-list", "#history-list")
+    _FOCUS_RING = ("#adql-editor", "#results-table", "#cols-filter", "#columns-list", "#history-list")
 
     _db_index: int = 0
     _drop_nulls: bool = False
@@ -873,11 +910,9 @@ class AstroDbApp(App):
         table = _parse_table(text)
         if table:
             self.query_one(SidebarPanel).update_table(table)
-            if table != self._last_detected_table:
-                self._last_detected_table = table
-                if table not in self._schema_cache:
-                    self._do_fetch_columns(table)
-            self._refresh_sidebar_columns(table, text)
+            if table in self._schema_cache:
+                self._refresh_sidebar_columns(table, text)
+            self._last_detected_table = table
         self._set_flow_state("dirty")
         if not self._save_dirty:
             self._save_dirty = True
@@ -964,8 +999,11 @@ class AstroDbApp(App):
         self.query_one(HeaderPanel).set_db(
             self._current_db.display_name, self._drop_nulls, db_key=self._current_db.name
         )
-        self._set_status(f"→ {self._current_db.display_name}")
+        self._set_status(f"→ {self._current_db.display_name} · ^F para columnas")
         self._set_flow_state("dirty")
+        self._schema_cache.clear()
+        self._last_detected_table = None
+        self.query_one(SidebarPanel).update_columns([], None, False)
 
     def action_toggle_nulls(self) -> None:
         self._drop_nulls = not self._drop_nulls
@@ -1016,12 +1054,15 @@ class AstroDbApp(App):
         adql = self.query_one("#adql-editor", TextArea).text
         table = _parse_table(adql)
         if not table:
+            self.notify("Sin FROM en editor. Escribí 'FROM tabla' primero.", severity="warning", timeout=4)
             self._set_status("No se detectó tabla en FROM")
             return
-        if table in self._schema_cache:
+        if table in self._schema_cache and self._schema_cache[table]:
             self._refresh_sidebar_columns(table, adql)
+            self.notify(f"{table}: {len(self._schema_cache[table])} columnas (caché)", timeout=2)
             self._set_status(f"{len(self._schema_cache[table])} columnas (caché)")
             return
+        self.notify(f"Consultando columnas de {table}…", timeout=2)
         self._do_fetch_columns(table)
 
     def action_cancel_query(self) -> None:

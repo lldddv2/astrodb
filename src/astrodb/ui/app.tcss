@@ -119,6 +119,18 @@ Screen {
     margin-bottom: 0;
 }
 
+#cols-filter {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin: 0;
+    background: $surface;
+}
+
+#cols-filter:focus {
+    border-left: tall $accent;
+}
+
 #columns-list {
     height: auto;
     max-height: 12;
