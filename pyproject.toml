@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "astrodb"
-version = "0.1.0"
+version = "0.1.1"
 description = "TUI for querying, cleaning, and persisting astronomical database records."
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,3 @@ astrodb = "astrodb.main:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/astrodb"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/astrodb/assets" = "astrodb/assets"
